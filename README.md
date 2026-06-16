@@ -1,9 +1,6 @@
 # ollama-asr
 
-A small [Textual](https://textual.textualize.io/) TUI that records your voice from the
-system **default microphone** (Wayland / PipeWire / PulseAudio), saves it as an mp3,
-sends it to a local **Ollama** speech-to-text endpoint, then shows the recognized text
-and language and copies the text to the Wayland clipboard.
+A small [Textual](https://textual.textualize.io/) TUI that records your voice from the system **default microphone**, saves it as an mp3, sends it to a local **Ollama** speech-to-text endpoint, then shows the recognized text and language and copies the text to the clipboard.
 
 ## Screenshot
 
@@ -38,9 +35,9 @@ Press **Tab** to cycle the transcription language through `auto` and every code 
 
 System packages (install with your distro's package manager):
 
-- `ffmpeg` (with `libmp3lame` + `pulse` input — already standard)
+- `ffmpeg` (with `libmp3lame` + `pulse` input)
 - `pulseaudio-utils` / `pipewire-pulse` for `pactl`
-- `wl-clipboard` for `wl-copy`  ← **not yet installed on this machine**
+- `wl-clipboard` for `wl-copy`
 
 On Fedora/Nobara:
 
@@ -48,16 +45,11 @@ On Fedora/Nobara:
 sudo dnf install wl-clipboard ffmpeg pulseaudio-utils
 ```
 
-Python deps live in a local venv (created automatically by `run.sh`):
-`textual`, `requests`.
-
 ## Usage
 
 ```sh
 ./run.sh
 ```
-
-Then: **Enter** to start, **Enter** to stop, **Tab** to change language, **q** to quit.
 
 ## Configuration
 
@@ -71,3 +63,8 @@ environment variables override it.
 | `OLLAMA_MODEL`     | `hf.co/ggml-org/Qwen3-ASR-1.7B-GGUF:Q8_0`        | ASR model                                        |
 | `LANGUAGES`        | _(empty)_                                        | ISO-639-1 codes, comma-separated, e.g. `fr,en`   |
 | `OLLAMA_ASR_FILE`  | `~/.cache/ollama-asr/recording.mp3`              | Where the recording is written                   |
+
+## License
+
+See LICENSE file in `./LICENSE`, Project under MIT.
+
