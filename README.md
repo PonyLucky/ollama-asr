@@ -5,6 +5,20 @@ system **default microphone** (Wayland / PipeWire / PulseAudio), saves it as an 
 sends it to a local **Ollama** speech-to-text endpoint, then shows the recognized text
 and language and copies the text to the Wayland clipboard.
 
+## Screenshot
+
+Main view:
+> ![Main view](./screenshots/screenshot-1.png)
+
+Recording:
+> ![Recording](./screenshots/screenshot-2.png)
+
+Done:
+> ![Done](./screenshots/screenshot-3.png)
+
+Show more info:
+> ![Recording](./screenshots/screenshot-4.png)
+
 ## How it works
 
 1. Reads the default mic via `pactl get-default-source`.
