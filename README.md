@@ -64,6 +64,63 @@ environment variables override it.
 | `LANGUAGES`        | _(empty)_                                        | ISO-639-1 codes, comma-separated, e.g. `fr,en`   |
 | `OLLAMA_ASR_FILE`  | `~/.cache/ollama-asr/recording.mp3`              | Where the recording is written                   |
 
+## Running against Ollama on another machine
+
+By default the app talks to Ollama on `localhost`. To run the app on one machine
+while Ollama runs on another in your local network, point `OLLAMA_URL` at the
+server's LAN address (keep the `/v1/audio/transcriptions` path):
+
+```sh
+OLLAMA_URL=http://192.168.1.50:11434/v1/audio/transcriptions
+```
+
+Only the audio file is sent over the network; mic recording (`ffmpeg`/`pactl`)
+and clipboard (`wl-copy`) still run locally. Make sure the chosen `OLLAMA_MODEL`
+is pulled **on the server**.
+
+On the server, Ollama must listen on all interfaces instead of `localhost`. With
+a systemd unit, edit `/etc/systemd/system/ollama.service` and add an
+`Environment` line under `[Service]`:
+
+```ini
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0:11434"
+```
+
+Then reload and restart:
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+```
+
+Open port `11434` in the firewall. With **firewalld** (Fedora/Nobara/RHEL):
+
+```sh
+sudo firewall-cmd --add-port=11434/tcp --permanent && sudo firewall-cmd --reload
+```
+
+With **ufw** (other):
+
+```sh
+sudo ufw allow 11434/tcp
+```
+
+Verify from the client: `curl http://192.168.1.50:11434/api/tags` should list the
+server's models.
+
+> ⚠️ **Trusted networks only.** Binding to `0.0.0.0` exposes Ollama
+> unauthenticated to everyone who can reach the port. Only do this on a trusted
+> local network. To be stricter, restrict the firewall rule to the client's IP
+> instead of opening the port to everyone:
+>
+> ```sh
+> # firewalld
+> sudo firewall-cmd --add-rich-rule='rule family="ipv4" source address="192.168.1.10" port port="11434" protocol="tcp" accept' --permanent && sudo firewall-cmd --reload
+> # ufw
+> sudo ufw allow from 192.168.1.10 to any port 11434 proto tcp
+> ```
+
 ## License
 
 See LICENSE file in `./LICENSE`, Project under MIT.
