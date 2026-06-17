@@ -58,7 +58,7 @@ environment variables override it.
 
 | Variable           | Default                                          | Notes                                            |
 | ------------------ | ------------------------------------------------ | ------------------------------------------------ |
-| `OLLAMA_URL`       | `http://localhost:11434/v1/audio/transcriptions` | Transcription endpoint                           |
+| `OLLAMA_URL`       | `http://localhost:11434/v1/audio/transcriptions` | [Transcription endpoint](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create)                |
 | `OLLAMA_API_KEY`   | `ollama`                                         | Sent as `Authorization: Bearer …`                |
 | `OLLAMA_MODEL`     | `hf.co/ggml-org/Qwen3-ASR-1.7B-GGUF:Q8_0`        | ASR model                                        |
 | `LANGUAGES`        | _(empty)_                                        | ISO-639-1 codes, comma-separated, e.g. `fr,en`   |
@@ -67,4 +67,3 @@ environment variables override it.
 ## License
 
 See LICENSE file in `./LICENSE`, Project under MIT.
-

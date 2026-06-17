@@ -7,6 +7,7 @@ Flow:
               transcription endpoint, show the text + detected language, copy text to
               the Wayland clipboard with wl-copy.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -31,19 +32,22 @@ from textual.widgets import Footer, Header, Static
 # Load a .env sitting next to this script (real environment variables win).
 load_dotenv(Path(__file__).with_name(".env"))
 
+# Reference: https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create
 OLLAMA_URL = os.environ.get(
     "OLLAMA_URL", "http://localhost:11434/v1/audio/transcriptions"
 )
-OLLAMA_MODEL = os.environ.get(
-    "OLLAMA_MODEL", "hf.co/ggml-org/Qwen3-ASR-1.7B-GGUF:Q8_0"
-)
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "hf.co/ggml-org/Qwen3-ASR-1.7B-GGUF:Q8_0")
 OLLAMA_TOKEN = os.environ.get("OLLAMA_API_KEY", "ollama")
 # Expected languages as ISO-639-1 codes, e.g. "fr,en". Used to (a) hint the model
 # when exactly one is given and (b) map the detected language name to its code.
-LANGUAGES = [c.strip().lower() for c in os.environ.get("LANGUAGES", "").split(",") if c.strip()]
+LANGUAGES = [
+    c.strip().lower() for c in os.environ.get("LANGUAGES", "").split(",") if c.strip()
+]
 # Where to keep the recording. Reused each time; the last take stays on disk.
 RECORD_PATH = Path(
-    os.environ.get("OLLAMA_ASR_FILE", str(Path.home() / ".cache" / "ollama-asr" / "recording.mp3"))
+    os.environ.get(
+        "OLLAMA_ASR_FILE", str(Path.home() / ".cache" / "ollama-asr" / "recording.mp3")
+    )
 )
 
 # Manual mapping for the 10 main languages: spelled-out name -> ISO-639-1 code.
@@ -113,7 +117,7 @@ def parse_transcription(raw: str) -> tuple[str, str, str]:
         text = body.strip()
         prefix = prefix.strip()
         if prefix.lower().startswith("language"):
-            prefix = prefix[len("language"):].strip()
+            prefix = prefix[len("language") :].strip()
         if prefix:
             language = prefix
             code = LANGUAGE_CODES.get(prefix.lower(), "")
@@ -165,12 +169,17 @@ class Recorder:
         self.proc = await asyncio.create_subprocess_exec(
             "ffmpeg",
             "-hide_banner",
-            "-loglevel", "error",
+            "-loglevel",
+            "error",
             "-y",
-            "-f", "pulse",
-            "-i", self.source,
-            "-codec:a", "libmp3lame",
-            "-q:a", "2",
+            "-f",
+            "pulse",
+            "-i",
+            self.source,
+            "-codec:a",
+            "libmp3lame",
+            "-q:a",
+            "2",
             str(self.outfile),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.DEVNULL,
@@ -320,7 +329,9 @@ class ASRApp(App):
         status.remove_class("recording", "working", "ok")
         if self.state is State.IDLE:
             status.update("Ready")
-            hint.update("[b]Enter[/b] record  ·  [b]Tab[/b] language  ·  [b]i[/b] info  ·  [b]q[/b] quit")
+            hint.update(
+                "[b]Enter[/b] record  ·  [b]Tab[/b] language  ·  [b]i[/b] info  ·  [b]q[/b] quit"
+            )
         elif self.state is State.RECORDING:
             status.update(f"● Recording…  {self._format_elapsed()}")
             status.add_class("recording")
@@ -398,7 +409,9 @@ class ASRApp(App):
         await self.recorder.stop()
         self.state = State.TRANSCRIBING
         try:
-            raw = await asyncio.to_thread(transcribe, RECORD_PATH, self.selected_language)
+            raw = await asyncio.to_thread(
+                transcribe, RECORD_PATH, self.selected_language
+            )
         except requests.RequestException as exc:
             self.show_error(f"Transcription request failed: {exc}")
             return
@@ -412,10 +425,13 @@ class ASRApp(App):
         self.query_one("#language", Static).update(f"Detected language: {label}")
         self.query_one("#text", Static).update(text or "[i](no speech detected)[/i]")
         if text and copy_to_clipboard(text):
-            self.query_one("#text", Static).update(text + "\n\n[green]✓ copied to clipboard[/green]")
+            self.query_one("#text", Static).update(
+                text + "\n\n[green]✓ copied to clipboard[/green]"
+            )
         elif text:
             self.query_one("#text", Static).update(
-                text + "\n\n[yellow]wl-copy not found — install wl-clipboard to copy[/yellow]"
+                text
+                + "\n\n[yellow]wl-copy not found — install wl-clipboard to copy[/yellow]"
             )
         self.state = State.RESULT
 
