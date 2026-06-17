@@ -15,6 +15,7 @@ import os
 import shutil
 import subprocess
 import time
+from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
 
@@ -33,11 +34,42 @@ from textual.widgets import Footer, Header, Static
 load_dotenv(Path(__file__).with_name(".env"))
 
 # Reference: https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create
-OLLAMA_URL = os.environ.get(
-    "OLLAMA_URL", "http://localhost:11434/v1/audio/transcriptions"
+# Each OLLAMA_URL is a server root; the transcription endpoint path is appended below.
+TRANSCRIBE_ENDPOINT = "/v1/audio/transcriptions"
+DEFAULT_MODEL = "hf.co/ggml-org/Qwen3-ASR-1.7B-GGUF:Q8_0"
+# Ollama ignores the bearer token, so it's always the literal "ollama".
+OLLAMA_TOKEN = "ollama"
+
+
+@dataclass(frozen=True)
+class Server:
+    """An Ollama server: its root URL and the model to use with it."""
+
+    root_url: str
+    model: str
+
+    @property
+    def transcribe_url(self) -> str:
+        """Full OpenAI-compatible transcription endpoint for this server."""
+        return self.root_url.rstrip("/") + TRANSCRIBE_ENDPOINT
+
+
+PRIMARY = Server(
+    os.environ.get("OLLAMA_URL", "http://localhost:11434"),
+    os.environ.get("OLLAMA_MODEL", DEFAULT_MODEL),
 )
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "hf.co/ggml-org/Qwen3-ASR-1.7B-GGUF:Q8_0")
-OLLAMA_TOKEN = os.environ.get("OLLAMA_API_KEY", "ollama")
+
+# Optional fallback, used when the primary root URL doesn't answer at startup.
+# Leave FALLBACK_OLLAMA_URL blank (the default) to disable it.
+_fallback_url = os.environ.get("FALLBACK_OLLAMA_URL", "").strip()
+FALLBACK: Server | None = (
+    Server(
+        _fallback_url,
+        os.environ.get("FALLBACK_OLLAMA_MODEL", DEFAULT_MODEL),
+    )
+    if _fallback_url
+    else None
+)
 # Expected languages as ISO-639-1 codes, e.g. "fr,en". Used to (a) hint the model
 # when exactly one is given and (b) map the detected language name to its code.
 LANGUAGES = [
@@ -135,18 +167,27 @@ def copy_to_clipboard(text: str) -> bool:
         return False
 
 
-def transcribe(path: Path, language: str | None = None) -> str:
-    """Blocking POST of the mp3 to Ollama; returns the raw ``text`` field.
+def server_is_up(server: Server, timeout: float = 1.0) -> bool:
+    """Probe a server's root URL; True if it answers HTTP 200 within ``timeout`` seconds."""
+    try:
+        resp = requests.get(server.root_url.rstrip("/") + "/", timeout=timeout)
+        return resp.status_code == 200
+    except requests.RequestException:
+        return False
+
+
+def transcribe(server: Server, path: Path, language: str | None = None) -> str:
+    """Blocking POST of the mp3 to ``server``; returns the raw ``text`` field.
 
     ``language`` is the optional ISO-639-1 hint sent as the OpenAI-compatible
     ``language`` form field. Pass ``None``/``"auto"`` to let the model auto-detect.
     """
-    data = {"model": OLLAMA_MODEL}
+    data = {"model": server.model}
     if language and language != "auto":
         data["language"] = language
     with open(path, "rb") as fh:
         resp = requests.post(
-            OLLAMA_URL,
+            server.transcribe_url,
             headers={"Authorization": f"Bearer {OLLAMA_TOKEN}"},
             files={"file": (path.name, fh, "audio/mpeg")},
             data=data,
@@ -262,6 +303,7 @@ class ASRApp(App):
     def __init__(self) -> None:
         super().__init__()
         self.source = get_default_source()
+        self.server = PRIMARY  # may switch to FALLBACK after the startup probe
         self.recorder = Recorder(self.source, RECORD_PATH)
         self._record_start = 0.0
         self._timer: Timer | None = None
@@ -282,15 +324,56 @@ class ASRApp(App):
 
     def on_mount(self) -> None:
         self.theme = "dracula"
-        info = self.query_one("#info", Static)
-        info.update(
-            f"[b]Endpoint[/b]  {OLLAMA_URL}\n"
-            f"[b]Model[/b]     {OLLAMA_MODEL}\n"
-            f"[b]File[/b]      {RECORD_PATH}"
-        )
-        info.display = False
+        self.render_info()
+        self.query_one("#info", Static).display = False
         self.render_language()
         self.render_state()
+        self.select_server()
+
+    def render_info(self) -> None:
+        """Refresh the details panel to reflect the currently active server."""
+        self.query_one("#info", Static).update(
+            f"[b]Endpoint[/b]  {self.server.transcribe_url}\n"
+            f"[b]Model[/b]     {self.server.model}\n"
+            f"[b]File[/b]      {RECORD_PATH}"
+        )
+
+    @work
+    async def select_server(self) -> None:
+        """Probe the primary server at startup; fall back if it's unreachable.
+
+        The probe is a 1s GET of the server root, considered healthy on HTTP 200.
+        Runs as a worker so the 1s timeout never blocks the UI.
+        """
+        if await asyncio.to_thread(server_is_up, PRIMARY):
+            return  # primary is healthy; self.server already points at it
+        if FALLBACK is None:
+            self.notify(
+                f"Ollama at {PRIMARY.root_url} is unreachable and no fallback is "
+                "configured — transcription will fail.",
+                title="Ollama unreachable",
+                severity="warning",
+                timeout=10,
+            )
+            return
+        if await asyncio.to_thread(server_is_up, FALLBACK):
+            self.server = FALLBACK
+            self.render_info()
+            self.notify(
+                f"Primary Ollama ({PRIMARY.root_url}) did not respond — using "
+                f"fallback {FALLBACK.root_url}.",
+                title="Using fallback Ollama",
+                severity="warning",
+                timeout=10,
+            )
+        else:
+            self.notify(
+                f"Neither primary ({PRIMARY.root_url}) nor fallback "
+                f"({FALLBACK.root_url}) responded — transcription will fail.",
+                title="No Ollama reachable",
+                severity="error",
+                timeout=10,
+            )
 
     def action_info(self) -> None:
         """Toggle the details panel (endpoint, model, recording path)."""
@@ -410,7 +493,7 @@ class ASRApp(App):
         self.state = State.TRANSCRIBING
         try:
             raw = await asyncio.to_thread(
-                transcribe, RECORD_PATH, self.selected_language
+                transcribe, self.server, RECORD_PATH, self.selected_language
             )
         except requests.RequestException as exc:
             self.show_error(f"Transcription request failed: {exc}")
