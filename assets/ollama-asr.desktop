@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=ollama-asr
+GenericName=Speech-to-Text
+Comment=Record from the default mic and transcribe via Ollama
+Exec=/home/louis/Git/ollama-asr/run.sh
+Icon=/home/louis/Git/ollama-asr/assets/logo.png
+Terminal=true
+Categories=Utility;AudioVideo;Audio;
+Keywords=speech;transcription;asr;voice;ollama;whisper;
+StartupNotify=false

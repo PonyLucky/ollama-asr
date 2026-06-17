@@ -5,16 +5,16 @@ A small [Textual](https://textual.textualize.io/) TUI that records your voice fr
 ## Screenshot
 
 Main view:
-> ![Main view](./screenshots/screenshot-1.png)
+> ![Main view](./assets/screenshots/screenshot-1.png)
 
 Recording:
-> ![Recording](./screenshots/screenshot-2.png)
+> ![Recording](./assets/screenshots/screenshot-2.png)
 
 Done:
-> ![Done](./screenshots/screenshot-3.png)
+> ![Done](./assets/screenshots/screenshot-3.png)
 
 Show more info:
-> ![Recording](./screenshots/screenshot-4.png)
+> ![Recording](./assets/screenshots/screenshot-4.png)
 
 ## How it works
 
