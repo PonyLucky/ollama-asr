@@ -24,7 +24,7 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
-from textual import work
+from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -181,6 +181,20 @@ def copy_to_clipboard(text: str) -> bool:
         return False
     try:
         subprocess.run(["wl-copy"], input=text.encode("utf-8"), check=True)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def send_system_notification(title: str, body: str) -> bool:
+    """Send a desktop notification via notify-send. Returns False if unavailable."""
+    if not shutil.which("notify-send"):
+        return False
+    try:
+        subprocess.run(
+            ["notify-send", "--app-name=ollama-asr", title, body],
+            check=True,
+        )
         return True
     except (OSError, subprocess.SubprocessError):
         return False
@@ -409,6 +423,9 @@ class ASRApp(App):
         self._timer: Timer | None = None
         self.lang_index = 0  # position in LANGUAGE_CYCLE
         self._last_text = ""  # most recent transcription, for re-copy
+        # Whether the terminal window currently has focus. Updated by the AppFocus/
+        # AppBlur events; assume focused until the terminal tells us otherwise.
+        self._app_focused = True
         # Global-shortcut listener thread; only created when SHORTCUT_RECORD_HINT is set.
         self._shortcut: ShortcutListener | None = None
 
@@ -462,6 +479,12 @@ class ASRApp(App):
             return
         self._shortcut = listener
         shortcut.update(f"⌨  Global toggle: [b]{SHORTCUT_RECORD_HINT}[/b]")
+
+    def on_app_focus(self, _event: events.AppFocus) -> None:
+        self._app_focused = True
+
+    def on_app_blur(self, _event: events.AppBlur) -> None:
+        self._app_focused = False
 
     def on_unmount(self) -> None:
         if self._shortcut is not None:
@@ -648,11 +671,23 @@ class ASRApp(App):
             self.query_one("#text", Static).update(
                 text + "\n\n[green]✓ copied to clipboard[/green]"
             )
+            # When the user isn't looking at the app (typical global-shortcut flow:
+            # record in the background, then paste elsewhere), let them know the
+            # transcription is ready and on the clipboard via a desktop notification.
+            if not self._app_focused:
+                send_system_notification("Transcription ready", text)
         elif text:
             self.query_one("#text", Static).update(
                 text
                 + "\n\n[yellow]wl-copy not found — install wl-clipboard to copy[/yellow]"
             )
+            # The transcription is ready but couldn't be copied; if the user isn't
+            # watching the app they'd otherwise never know, so warn them.
+            if not self._app_focused:
+                send_system_notification(
+                    "Transcription ready — copy failed",
+                    "Could not copy to the clipboard (install wl-clipboard).",
+                )
         self.state = State.RESULT
 
     def show_error(self, message: str) -> None:
