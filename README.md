@@ -63,6 +63,50 @@ environment variables override it.
 | `OLLAMA_MODEL`     | `hf.co/ggml-org/Qwen3-ASR-1.7B-GGUF:Q8_0`        | ASR model                                        |
 | `LANGUAGES`        | _(empty)_                                        | ISO-639-1 codes, comma-separated, e.g. `fr,en`   |
 | `OLLAMA_ASR_FILE`  | `~/.cache/ollama-asr/recording.mp3`              | Where the recording is written                   |
+| `SHORTCUT_RECORD_HINT` | _(empty)_                                    | Label for the global start/stop shortcut; its presence enables the listener (see below) |
+
+## Global start/stop shortcut (Wayland)
+
+You can start/stop recording with a key combo even when the app is unfocused or
+minimized. On Wayland an application can't grab global hotkeys itself — only the
+compositor can — so the key is bound in your **desktop settings** and runs a
+command that launches the app (if needed) and signals it over a Unix socket.
+
+1. Set `SHORTCUT_RECORD_HINT` in your `.env` to the key combo you plan to bind.
+   The value is **only a label** — the app can't register the key itself, so this
+   string is just shown in the UI to remind you what you wired up:
+
+   ```sh
+   SHORTCUT_RECORD_HINT=Meta+R
+   ```
+
+   Its presence enables the listener thread on startup. Leave it blank to disable
+   the feature (no thread, no socket) — the UI then shows the shortcut as
+   "not set".
+
+2. Bind a global shortcut to run `run.sh --toggle` (the same flow works in any
+   desktop):
+
+   - **KDE Plasma**: *System Settings → Keyboard → Shortcuts → Add Command or
+     Script*. Set the command to:
+
+     ```sh
+     /home/louis/Git/ollama-asr/run.sh --toggle
+     ```
+
+     then assign your trigger (e.g. `Meta+R`).
+   - **GNOME**: *Settings → Keyboard → Custom Shortcuts* → add the same command.
+
+`run.sh --toggle` is the all-in-one binding: if the app is already running it
+toggles recording (first press starts, next press stops and transcribes — like
+pressing **Enter** in the TUI); if it isn't, it opens the TUI in a detected
+terminal emulator (kitty, alacritty, foot, konsole, gnome-terminal, …) and
+starts recording immediately, so a single key both launches and records. The
+control socket lives at `$XDG_RUNTIME_DIR/ollama-asr.sock`.
+
+The `--toggle` argument is passed straight through to `app.py`, so the shell
+wrapper and the Python app share the same flag and adding new flags later only
+touches `app.py`.
 
 ## Running against Ollama on another machine
 

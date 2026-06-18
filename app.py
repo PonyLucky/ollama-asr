@@ -13,7 +13,10 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import socket
 import subprocess
+import sys
+import threading
 import time
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -81,6 +84,22 @@ RECORD_PATH = Path(
         "OLLAMA_ASR_FILE", str(Path.home() / ".cache" / "ollama-asr" / "recording.mp3")
     )
 )
+
+# Global start/stop shortcut. The app can't grab keys on Wayland (only the
+# compositor can), so the actual key is bound in your desktop's settings to run
+# `app.py --toggle`. This value is purely a label: it's shown in the UI to remind
+# you which combo you bound, and its presence enables the listener thread that the
+# --toggle command talks to. Leave it blank/unset to disable the feature entirely
+# (no thread, no socket) — the UI then shows the shortcut as "not set".
+SHORTCUT_RECORD_HINT = os.environ.get("SHORTCUT_RECORD_HINT", "").strip()
+
+
+def control_socket_path() -> Path:
+    """Path of the Unix socket used by ``--toggle`` to reach the running app."""
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime_dir:
+        return Path(runtime_dir) / "ollama-asr.sock"
+    return Path.home() / ".cache" / "ollama-asr" / "control.sock"
 
 # Manual mapping for the 10 main languages: spelled-out name -> ISO-639-1 code.
 LANGUAGE_CODES = {
@@ -248,6 +267,83 @@ class Recorder:
             self.proc = None
 
 
+def send_toggle() -> int:
+    """Client side of ``--toggle``: tell the running app to start/stop recording.
+
+    Connects to the control socket and sends ``toggle``. Returns a process exit
+    code: 0 on success, 1 if no running app is listening.
+    """
+    path = control_socket_path()
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(2)
+            sock.connect(str(path))
+            sock.sendall(b"toggle\n")
+        return 0
+    except OSError as exc:
+        print(
+            f"ollama-asr: could not reach a running app on {path} ({exc}).\n"
+            "Make sure it's running with SHORTCUT_RECORD_HINT set.",
+            file=sys.stderr,
+        )
+        return 1
+
+
+class ShortcutListener:
+    """Background thread that turns ``--toggle`` connections into app actions.
+
+    Listens on a Unix socket and, for each connection that asks to ``toggle``,
+    schedules ``app.action_toggle`` on Textual's event loop via ``call_from_thread``.
+    Only created when SHORTCUT_RECORD_HINT is set, so the thread/socket don't exist
+    when the feature is disabled.
+    """
+
+    def __init__(self, app: "ASRApp", path: Path) -> None:
+        self.app = app
+        self.path = path
+        self._srv: socket.socket | None = None
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Remove a stale socket left by a previous run before binding.
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(str(self.path))
+        srv.listen(1)
+        self._srv = srv
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        assert self._srv is not None
+        while True:
+            try:
+                conn, _ = self._srv.accept()
+            except OSError:
+                break  # socket closed by stop()
+            with conn:
+                try:
+                    data = conn.recv(64)
+                except OSError:
+                    continue
+            if b"toggle" in data:
+                self.app.call_from_thread(self.app.action_toggle)
+
+    def stop(self) -> None:
+        """Close the socket (unblocking accept) and remove the socket file."""
+        if self._srv is not None:
+            self._srv.close()
+            self._srv = None
+        try:
+            self.path.unlink()
+        except FileNotFoundError:
+            pass
+
+
 class ASRApp(App):
     CSS = """
     Screen {
@@ -300,8 +396,12 @@ class ASRApp(App):
 
     state: reactive[State] = reactive(State.IDLE)
 
-    def __init__(self) -> None:
+    def __init__(self, autostart: bool = False) -> None:
         super().__init__()
+        # When launched via `--autostart` (run.sh --toggle does this on a fresh
+        # launch), begin recording on mount so a single global-shortcut press both
+        # opens the app and starts recording.
+        self._autostart = autostart
         self.source = get_default_source()
         self.server = PRIMARY  # may switch to FALLBACK after the startup probe
         self.recorder = Recorder(self.source, RECORD_PATH)
@@ -309,11 +409,14 @@ class ASRApp(App):
         self._timer: Timer | None = None
         self.lang_index = 0  # position in LANGUAGE_CYCLE
         self._last_text = ""  # most recent transcription, for re-copy
+        # Global-shortcut listener thread; only created when SHORTCUT_RECORD_HINT is set.
+        self._shortcut: ShortcutListener | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Vertical(id="panel"):
             yield Static(f"🎙  Microphone: [b]{self.source}[/b]", id="device")
+            yield Static("", id="shortcut")
             yield Static("", id="langsel")
             yield Static("", id="status")
             yield Static("", id="language")
@@ -329,6 +432,40 @@ class ASRApp(App):
         self.render_language()
         self.render_state()
         self.select_server()
+        self.setup_shortcut()
+        if self._autostart:
+            self.action_toggle()  # start recording immediately on a fresh launch
+
+    def setup_shortcut(self) -> None:
+        """Render the global-shortcut status line and, if set, start its listener."""
+        shortcut = self.query_one("#shortcut", Static)
+        if not SHORTCUT_RECORD_HINT:
+            shortcut.update(
+                "⌨  Global toggle: [dim]not set — set [b]SHORTCUT_RECORD_HINT[/b] "
+                "and bind run.sh --toggle in your OS settings[/dim]"
+            )
+            return
+        listener = ShortcutListener(self, control_socket_path())
+        try:
+            listener.start()
+        except OSError as exc:
+            shortcut.update(
+                f"⌨  Global toggle: [b]{SHORTCUT_RECORD_HINT}[/b] "
+                "[yellow](socket unavailable — disabled)[/yellow]"
+            )
+            self.notify(
+                f"Could not open the shortcut socket: {exc}",
+                title="Global shortcut disabled",
+                severity="warning",
+                timeout=8,
+            )
+            return
+        self._shortcut = listener
+        shortcut.update(f"⌨  Global toggle: [b]{SHORTCUT_RECORD_HINT}[/b]")
+
+    def on_unmount(self) -> None:
+        if self._shortcut is not None:
+            self._shortcut.stop()
 
     def render_info(self) -> None:
         """Refresh the details panel to reflect the currently active server."""
@@ -524,4 +661,7 @@ class ASRApp(App):
 
 
 if __name__ == "__main__":
-    ASRApp().run()
+    if "--toggle" in sys.argv[1:]:
+        # Lightweight client invocation: signal the already-running app, then exit.
+        sys.exit(send_toggle())
+    ASRApp(autostart="--autostart" in sys.argv[1:]).run()
