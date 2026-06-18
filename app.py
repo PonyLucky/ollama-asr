@@ -645,6 +645,10 @@ class ASRApp(App):
         self._record_start = time.monotonic()
         self.state = State.RECORDING
         self._timer = self.set_interval(0.25, self._tick)
+        # Started from a global shortcut while working elsewhere — confirm the mic
+        # is live so the user knows recording has begun.
+        if not self._app_focused:
+            send_system_notification("Recording started", "Listening from the microphone…")
 
     @work(exclusive=True)
     async def stop_and_transcribe(self) -> None:
