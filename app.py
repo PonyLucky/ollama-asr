@@ -81,7 +81,7 @@ LANGUAGES = [
 # Where to keep the recording. Reused each time; the last take stays on disk.
 RECORD_PATH = Path(
     os.environ.get(
-        "OLLAMA_ASR_FILE", str(Path.home() / ".cache" / "ollama-asr" / "recording.mp3")
+        "OLLAMA_ASR_FILE", str(Path.home() / ".cache" / "ollama-asr" / "recording.wav")
     )
 )
 
@@ -253,7 +253,7 @@ def transcribe(server: Server, path: Path, language: str | None = None) -> str:
         resp = requests.post(
             server.transcribe_url,
             headers={"Authorization": f"Bearer {OLLAMA_TOKEN}"},
-            files={"file": (path.name, fh, "audio/mpeg")},
+            files=[("file", (path.name, fh, "audio/wav"))],
             data=data,
             timeout=300,
         )
@@ -262,7 +262,7 @@ def transcribe(server: Server, path: Path, language: str | None = None) -> str:
 
 
 class Recorder:
-    """Records the default mic to an mp3 using ffmpeg's pulse input."""
+    """Records the default mic to a WAV file using ffmpeg's pulse input."""
 
     def __init__(self, source: str, outfile: Path) -> None:
         self.source = source
@@ -281,10 +281,8 @@ class Recorder:
             "pulse",
             "-i",
             self.source,
-            "-codec:a",
-            "libmp3lame",
-            "-q:a",
-            "2",
+            "-f",
+            "wav",
             str(self.outfile),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.DEVNULL,
@@ -295,13 +293,24 @@ class Recorder:
         """Ask ffmpeg to finalize the file cleanly, falling back to terminate."""
         if self.proc is None:
             return
+        # Try graceful shutdown first: write 'q' and wait for ffmpeg to finish.
         try:
-            if self.proc.stdin is not None:
-                self.proc.stdin.write(b"q")
-                await self.proc.stdin.drain()
-                self.proc.stdin.close()
+            stdin = self.proc.stdin
+            if stdin is not None and not stdin.is_closing():
+                stdin.write(b"q")
+                await stdin.drain()
+                stdin.close()
             await asyncio.wait_for(self.proc.wait(), timeout=5)
-        except (asyncio.TimeoutError, BrokenPipeError, ConnectionResetError):
+        except (
+            BrokenPipeError,
+            ConnectionResetError,
+            RuntimeError,
+            AttributeError,
+            OSError,
+            asyncio.TimeoutError,
+        ):
+            # Graceful shutdown failed (ffmpeg exited early, or stdin was torn down),
+            # or the process ignored our quit signal — force kill it.
             self.proc.terminate()
             try:
                 await asyncio.wait_for(self.proc.wait(), timeout=5)
