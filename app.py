@@ -215,15 +215,17 @@ def copy_to_clipboard(text: str) -> bool:
     return False
 
 
-def send_system_notification(title: str, body: str) -> bool:
+def send_system_notification(title: str, body: str, is_important: bool = False) -> bool:
     """Send a desktop notification via notify-send. Returns False if unavailable."""
     if not shutil.which("notify-send"):
         return False
+    args = ["notify-send", "--app-name=ollama-asr"]
+    if is_important:
+        args.append("--urgency=critical")
+    args.append(title)
+    args.append(body)
     try:
-        subprocess.run(
-            ["notify-send", "--app-name=ollama-asr", title, body],
-            check=True,
-        )
+        subprocess.run(args, check=True)
         return True
     except (OSError, subprocess.SubprocessError):
         return False
@@ -644,6 +646,7 @@ class ASRApp(App):
                 send_system_notification(
                     "Time limit hit, need your attention",
                     f"Recording stopped after {int(MAX_RECORDING_DURATION)} s",
+                    is_important=True,
                 )
 
             # Inline prompt: show a question in status/hint so the user can choose.
