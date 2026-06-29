@@ -25,7 +25,7 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 from textual import events, work
-from textual.app import App, ComposeResult, Screen
+from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.reactive import reactive
@@ -310,49 +310,6 @@ class Recorder:
             self.proc = None
 
 
-class _TimeLimitPrompt(Screen):
-    """Modal yes/no prompt shown after auto-stop due to recording time limit.
-
-    Press ``y`` (or Enter) / ``n`` / Esc. Returns ``True`` for "transcribe" and
-    ``False`` otherwise via :meth:`Screen.dismiss` so the caller can branch.
-    """
-
-    DEFAULT_CSS = """
-    #prompt-box {
-        width: 60;
-        height: auto;
-        border: round $accent;
-        background: $surface;
-        padding: 1 2;
-        align: center middle;
-    }
-    #prompt-msg { text-align: center; }
-    """
-
-    def __init__(self, limit_seconds: int) -> None:
-        super().__init__()
-        self._limit = limit_seconds
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="prompt-box"):
-            yield Static(
-                f"[b]⏱ Time limit reached[/b]\n\n"
-                f"Recording stopped after {self._limit} s (no transcription yet). "
-                f"Transcribe?\n\n"
-                "[green]y[/green]) Transcribe    [red]n[/red]) Discard",
-                id="prompt-msg",
-            )
-
-    def on_key(self, event: events.Key) -> None:
-        key = event.key.lower()
-        if key in ("y", "enter"):
-            event.stop()
-            self.dismiss(True)
-        elif key in ("n", "escape"):
-            event.stop()
-            self.dismiss(False)
-
-
 def send_toggle() -> int:
     """Client side of ``--toggle``: tell the running app to start/stop recording.
 
@@ -500,6 +457,8 @@ class ASRApp(App):
         self._app_focused = True
         # Global-shortcut listener thread; only created when SHORTCUT_RECORD_HINT is set.
         self._shortcut: ShortcutListener | None = None
+        # Whether we've hit the time limit and are awaiting y/n to transcribe or discard.
+        self._time_limit_waiting = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -668,18 +627,18 @@ class ASRApp(App):
         elapsed = int(time.monotonic() - self._record_start)
         return f"{elapsed // 60}:{elapsed % 60:02d}"
 
-    async def _tick(self) -> None:
+    def _tick(self) -> None:
+        """Sync callback fired by ``set_interval`` every 0.25 s while recording."""
         self.query_one("#status", Static).update(
             f"● Recording…  {self._format_elapsed()}"
         )
         # Auto-stop when the configured maximum has been exceeded.
         if (
             MAX_RECORDING_DURATION is not None
-            and time.monotonic() - self._record_start > MAX_RECORDING_DURATION
+            and time.monotonic() - self._record_start >= MAX_RECORDING_DURATION
         ):
-            # Stop recording first so ffmpeg doesn't keep listening while we wait.
+            # Stop further tick firing so we don't race while stopping ffmpeg.
             self._stop_timer()
-            await self.recorder.stop()
 
             if not self._app_focused:
                 send_system_notification(
@@ -687,19 +646,76 @@ class ASRApp(App):
                     f"Recording stopped after {int(MAX_RECORDING_DURATION)} s",
                 )
 
-            # Ask the user whether to transcribe before sending an unwanted audio clip
-            # to Ollama. push_screen_wait returns True (y/Enter) or False (n/Esc).
-            prompt = _TimeLimitPrompt(int(MAX_RECORDING_DURATION))
-            try:
-                result = await self.push_screen_wait(prompt)
-            except Exception:  # pragma: no cover - defensive; cancels on quit
-                return
+            # Inline prompt: show a question in status/hint so the user can choose.
+            limit = int(MAX_RECORDING_DURATION)
+            self.query_one("#status", Static).update(
+                f"Recorded {self._format_elapsed()} (limit: "
+                f"{limit // 60}:{limit % 60:02d})"
+            )
+            self.query_one("#hint", Static).update(
+                "[green]y[/green]) Transcribe   [red]n[/red]) Discard"
+            )
+            self._time_limit_waiting = True
 
-            if result:
-                # stop_and_transcribe re-stops the recorder (no-op since already stopped), then POSTs to Ollama.
-                self.stop_and_transcribe()
-            else:
-                self.state = State.IDLE
+            # recorder.stop() is async (uses asyncio.subprocess); schedule it via
+            # Textual's callback mechanism so we stay on the event loop safely.
+            self.call_later(self._stop_recorder_async)
+
+    def _stop_recorder_async(self) -> None:
+        """Sync entry point called by ``call_later`` — runs recorder.stop() as a detached async task."""
+        # call_later invokes this in the app's event loop, so we can use asyncio.get_running_loop.
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:  # no running loop (app may be shutting down)
+            return
+        if loop.is_running():
+            asyncio.ensure_future(self.recorder.stop())
+
+    async def _on_key(self, event: events.Key) -> None:
+        """Intercept ``y`` / ``n`` while the time-limit prompt is awaiting an answer.
+
+        Textual dispatches bindings *before* widget ``on_key`` (the public entry point),
+        so we override the protected `_on_key` at App level to intercept keys before any
+        binding can consume them — in particular ``'n'`` which would otherwise land on
+        the "new" action.
+        """
+        if self._time_limit_waiting is False or not isinstance(event, events.Key):
+            await super()._on_key(event)
+            return
+        key = event.key.lower()
+        if key == "y":
+            event.stop()  # consume before bindings run (also stops further dispatch)
+            self.action_transcribe_now()
+            return
+        if key == "n":
+            # 'n' is normally bound to "new" — eat it while waiting so the binding doesn't fire.
+            event.stop()
+            self._discard_time_limit()
+            return
+        await super()._on_key(event)
+
+    def action_transcribe_now(self) -> None:
+        """Handle the user's "yes" after a time-limit auto-stop.
+
+        The recorder has already been stopped (or is stopping); this method just tells
+        ``stop_and_transcribe`` to POST the saved audio to Ollama as usual.
+        """
+        self._time_limit_waiting = False
+        # reset status/hint so the rendering in stop_and_transcribe replaces them cleanly
+        self.query_one("#status", Static).update("Transcribing…")
+        self.query_one("#hint", Static).update("Sending audio to Ollama, please wait")
+        self.state = State.TRANSCRIBING
+        # Call as a worker task — Textual's @work decorator schedules async methods on the app.
+        self.stop_and_transcribe()
+
+    def _discard_time_limit(self) -> None:
+        """Handle the user's "no": clear state and go back to idle."""
+        self._time_limit_waiting = False
+        self.query_one("#status", Static).update("Ready")
+        self.query_one("#hint", Static).update(
+            "[b]Enter[/b] record  ·  [b]Tab[/b] language  ·  [b]i[/b] info  ·  [b]q[/b] quit"
+        )
+        self.state = State.IDLE
 
     def _stop_timer(self) -> None:
         if self._timer is not None:
