@@ -70,6 +70,7 @@ Settings are read from a `.env` next to the script (see `.env.example`); real sh
 | `LANGUAGES`        | _(empty)_                                        | ISO-639-1 codes, comma-separated, e.g. `fr,en`   |
 | `OLLAMA_ASR_FILE`  | `~/.cache/ollama-asr/recording.mp3`              | Where the recording is written                   |
 | `SHORTCUT_RECORD_HINT` | _(empty)_                                    | Label for the global start/stop shortcut; its presence enables the listener (see below) |
+| `OLLAMA_ASR_MAX_REC`   | `300`                                        | Maximum recording duration in seconds before auto-stop. `0` or blank disables. Guard against accidentally recording for hours. |
 
 ## Global start/stop shortcut
 
