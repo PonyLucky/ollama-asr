@@ -25,7 +25,7 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 from textual import events, work
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, Screen
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.reactive import reactive
@@ -93,6 +93,12 @@ RECORD_PATH = Path(
 # Leave it blank unset to disable the feature entirely (no thread, no socket) -
 # the UI then shows the shortcut as "not set".
 SHORTCUT_RECORD_HINT = os.environ.get("SHORTCUT_RECORD_HINT", "").strip()
+
+# Maximum recording duration before auto-stop (seconds). 0 or blank disables the limit.
+# Prevents accidentally leaving the mic open for hours — e.g. if a global shortcut fires it
+# while you walk away from your desk. Default is 300 s (5 minutes).
+_MAX_REC_RAW = os.environ.get("OLLAMA_ASR_MAX_REC", "300").strip()
+MAX_RECORDING_DURATION: float | None = int(_MAX_REC_RAW) if _MAX_REC_RAW else None
 
 
 def control_socket_path() -> Path:
@@ -302,6 +308,49 @@ class Recorder:
                 await self.proc.wait()
         finally:
             self.proc = None
+
+
+class _TimeLimitPrompt(Screen):
+    """Modal yes/no prompt shown after auto-stop due to recording time limit.
+
+    Press ``y`` (or Enter) / ``n`` / Esc. Returns ``True`` for "transcribe" and
+    ``False`` otherwise via :meth:`Screen.dismiss` so the caller can branch.
+    """
+
+    DEFAULT_CSS = """
+    #prompt-box {
+        width: 60;
+        height: auto;
+        border: round $accent;
+        background: $surface;
+        padding: 1 2;
+        align: center middle;
+    }
+    #prompt-msg { text-align: center; }
+    """
+
+    def __init__(self, limit_seconds: int) -> None:
+        super().__init__()
+        self._limit = limit_seconds
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="prompt-box"):
+            yield Static(
+                f"[b]⏱ Time limit reached[/b]\n\n"
+                f"Recording stopped after {self._limit} s (no transcription yet). "
+                f"Transcribe?\n\n"
+                "[green]y[/green]) Transcribe    [red]n[/red]) Discard",
+                id="prompt-msg",
+            )
+
+    def on_key(self, event: events.Key) -> None:
+        key = event.key.lower()
+        if key in ("y", "enter"):
+            event.stop()
+            self.dismiss(True)
+        elif key in ("n", "escape"):
+            event.stop()
+            self.dismiss(False)
 
 
 def send_toggle() -> int:
@@ -619,10 +668,38 @@ class ASRApp(App):
         elapsed = int(time.monotonic() - self._record_start)
         return f"{elapsed // 60}:{elapsed % 60:02d}"
 
-    def _tick(self) -> None:
+    async def _tick(self) -> None:
         self.query_one("#status", Static).update(
             f"● Recording…  {self._format_elapsed()}"
         )
+        # Auto-stop when the configured maximum has been exceeded.
+        if (
+            MAX_RECORDING_DURATION is not None
+            and time.monotonic() - self._record_start > MAX_RECORDING_DURATION
+        ):
+            # Stop recording first so ffmpeg doesn't keep listening while we wait.
+            self._stop_timer()
+            await self.recorder.stop()
+
+            if not self._app_focused:
+                send_system_notification(
+                    "Time limit hit, need your attention",
+                    f"Recording stopped after {int(MAX_RECORDING_DURATION)} s",
+                )
+
+            # Ask the user whether to transcribe before sending an unwanted audio clip
+            # to Ollama. push_screen_wait returns True (y/Enter) or False (n/Esc).
+            prompt = _TimeLimitPrompt(int(MAX_RECORDING_DURATION))
+            try:
+                result = await self.push_screen_wait(prompt)
+            except Exception:  # pragma: no cover - defensive; cancels on quit
+                return
+
+            if result:
+                # stop_and_transcribe re-stops the recorder (no-op since already stopped), then POSTs to Ollama.
+                self.stop_and_transcribe()
+            else:
+                self.state = State.IDLE
 
     def _stop_timer(self) -> None:
         if self._timer is not None:
