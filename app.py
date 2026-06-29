@@ -4,8 +4,8 @@
 Flow:
     Enter  -> start recording from the system default microphone (PipeWire/PulseAudio)
     Enter  -> stop recording, save to an mp3, POST it to Ollama's Whisper-compatible
-              transcription endpoint, show the text + detected language, copy text to
-              the Wayland clipboard with wl-copy.
+              transcription endpoint, show the text + detected language and copy it to
+              the clipboard via whichever of wl-copy / xclip / xsel is installed.
 """
 
 from __future__ import annotations
@@ -85,12 +85,13 @@ RECORD_PATH = Path(
     )
 )
 
-# Global start/stop shortcut. The app can't grab keys on Wayland (only the
-# compositor can), so the actual key is bound in your desktop's settings to run
-# `app.py --toggle`. This value is purely a label: it's shown in the UI to remind
-# you which combo you bound, and its presence enables the listener thread that the
-# --toggle command talks to. Leave it blank/unset to disable the feature entirely
-# (no thread, no socket) — the UI then shows the shortcut as "not set".
+# Global start/stop shortcut. Neither X11 nor Wayland lets an application grab
+# global hotkeys itself (only the compositor / X server can), so the actual key
+# is bound in your desktop's settings to run `app.py --toggle`. This value is
+# purely a label: it's shown in the UI to remind you which combo you bound, and
+# its presence enables the listener thread that the --toggle command talks to.
+# Leave it blank unset to disable the feature entirely (no thread, no socket) -
+# the UI then shows the shortcut as "not set".
 SHORTCUT_RECORD_HINT = os.environ.get("SHORTCUT_RECORD_HINT", "").strip()
 
 
@@ -100,6 +101,7 @@ def control_socket_path() -> Path:
     if runtime_dir:
         return Path(runtime_dir) / "ollama-asr.sock"
     return Path.home() / ".cache" / "ollama-asr" / "control.sock"
+
 
 # Manual mapping for the 10 main languages: spelled-out name -> ISO-639-1 code.
 LANGUAGE_CODES = {
@@ -175,15 +177,36 @@ def parse_transcription(raw: str) -> tuple[str, str, str]:
     return language, code, text
 
 
+# Clipboard providers, tried in priority order until one succeeds.
+# Each entry is (binary, extra args to put stdin onto the clipboard).
+_CLIPBOARD_PROVIDERS = [
+    ("wl-copy", []),  # Wayland
+    ("xclip", ["-selection", "clipboard", "-i"]),  # X11
+    ("xsel", ["--clipboard", "--input"]),  # X11 alternative
+]
+
+
 def copy_to_clipboard(text: str) -> bool:
-    """Copy text to the Wayland clipboard via wl-copy. Returns False if unavailable."""
-    if not shutil.which("wl-copy"):
-        return False
-    try:
-        subprocess.run(["wl-copy"], input=text.encode("utf-8"), check=True)
-        return True
-    except (OSError, subprocess.SubprocessError):
-        return False
+    """Copy ``text`` to the clipboard, trying providers in priority order.
+
+    Supports both Wayland and X11 — whichever of ``wl-copy``, ``xclip``, or
+    ``xsel`` is installed first (preference is wl-copy → xclip → xsel) wins.
+    Returns False only if none are available.
+    """
+    for binary, args in _CLIPBOARD_PROVIDERS:
+        if not shutil.which(binary):
+            continue
+        try:
+            subprocess.run(
+                [binary, *args],
+                input=text.encode("utf-8"),
+                check=True,
+                timeout=5,
+            )
+            return True
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return False
 
 
 def send_system_notification(title: str, body: str) -> bool:
@@ -622,7 +645,10 @@ class ASRApp(App):
         if copy_to_clipboard(self._last_text):
             self.notify("Copied to clipboard")
         else:
-            self.notify("wl-copy not found — install wl-clipboard", severity="warning")
+            self.notify(
+                "No clipboard tool found (install wl-clipboard, xclip, or xsel)",
+                severity="warning",
+            )
 
     def action_new(self) -> None:
         """Clear the current output and return to the idle screen."""
@@ -648,7 +674,9 @@ class ASRApp(App):
         # Started from a global shortcut while working elsewhere — confirm the mic
         # is live so the user knows recording has begun.
         if not self._app_focused:
-            send_system_notification("Recording started", "Listening from the microphone…")
+            send_system_notification(
+                "Recording started", "Listening from the microphone…"
+            )
 
     @work(exclusive=True)
     async def stop_and_transcribe(self) -> None:
@@ -681,16 +709,14 @@ class ASRApp(App):
             if not self._app_focused:
                 send_system_notification("Transcription ready", text)
         elif text:
-            self.query_one("#text", Static).update(
-                text
-                + "\n\n[yellow]wl-copy not found — install wl-clipboard to copy[/yellow]"
-            )
-            # The transcription is ready but couldn't be copied; if the user isn't
-            # watching the app they'd otherwise never know, so warn them.
+            # Transcription came back but we couldn't copy it — still surface
+            # the result so the user can select it, and alert them if they're
+            # not looking at the app (the usual global-shortcut flow).
+            self.query_one("#text", Static).update(text)
             if not self._app_focused:
                 send_system_notification(
                     "Transcription ready — copy failed",
-                    "Could not copy to the clipboard (install wl-clipboard).",
+                    "No clipboard tool found (install wl-clipboard, xclip or xsel).",
                 )
         self.state = State.RESULT
 
